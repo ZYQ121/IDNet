@@ -1,1 +1,1 @@
-# IDNet
+# Inplementation of IDNet model and local similarity loss
