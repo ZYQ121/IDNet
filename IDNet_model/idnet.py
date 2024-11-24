@@ -66,7 +66,12 @@ class skip(nn.Module):
         self.proj2 = nn.Conv2d(in_channel, out_channel, kernel_size=3, stride=stride, padding=1)
         self.proj3 = nn.Conv2d(out_channel, out_channel, kernel_size=1, stride=1, padding=0)
         self.act = nn.GELU()
-
+                     
+        def _initialize_weights(m):
+            if type(m) == nn.Conv2d:
+                nn.init.kaiming_normal_(m.weight)
+        self.apply(_initialize_weights)
+                     
     def forward(self, x):
         x1 = self.act(self.proj1(x))
         x2 = self.act(self.proj2(x))
@@ -83,7 +88,12 @@ class DeformableICM(nn.Module):
         self.deform_conv5 = DeformConv2dPack(in_channels=in_chans, out_channels=in_chans, kernel_size=5, padding=2)
         self.deform_conv7 = DeformConv2dPack(in_channels=in_chans, out_channels=in_chans, kernel_size=7, padding=3)
         self.act = nn.GELU()
-
+        
+        def _initialize_weights(m):
+            if type(m) == DeformConv2dPack:
+                nn.init.kaiming_normal_(m.weight)
+        self.apply(_initialize_weights)
+        
     def forward(self, x):
         x3 = self.act(self.deform_conv3(x))
         x5 = self.act(self.deform_conv5(x))
@@ -174,6 +184,12 @@ class Mlp(nn.Module):
         self.act = act_layer()
         self.fc2 = nn.Conv2d(hidden_features, out_features, 1)
         self.drop = nn.Dropout(drop)
+                     
+        def _initialize_weights(m):
+            if type(m) == nn.Conv2d:
+                nn.init.kaiming_normal_(m.weight)
+        self.apply(_initialize_weights)
+                     
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
