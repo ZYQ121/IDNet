@@ -411,7 +411,7 @@ class GRN(nn.Module):
     
 class IDNet(nn.Module):
     def __init__(self, grn=None, pcn=None):
-        super(IDNetFull, self).__init__()
+        super(IDNet, self).__init__()
         self.name = self.__class__.__name__
         # initialize from existing models or create new models
         self.grn = copy.deepcopy(grn.module) if grn is not None else GRN()
