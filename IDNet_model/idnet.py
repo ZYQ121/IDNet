@@ -1,7 +1,7 @@
 ## pytorch_tps is obtained from https://github.com/cheind/py-thin-plate-spline/blob/master/thinplate/pytorch.py
 ## the architecture of IDNet is based on the code from https://github.com/BingyaoHuang/CompenNeSt-plusplus/blob/master/src/python/Models.py
 
-# # Copyright 2021 Garena Online Private Limited
+# Copyright 2021 Garena Online Private Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
@@ -22,78 +21,33 @@ from torch.nn import GroupNorm
 import torch.nn.functional as F
 import pytorch_tps
 import copy
+from attention.non_local_coordinate import NonLocal
 from mmcv.ops import DeformConv2dPack
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
-class NonLocal(nn.Module):
-    ''' 
-    implementation of non-local module
-    refer to: https://arxiv.org/abs/1711.07971
-    '''
-    def __init__(self, in_channels):
-        super(NonLocal, self).__init__()
-    
-        self.in_channels = in_channels
-        self.inter_channels = in_channels // 2
-        self.g = nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1, stride=1, padding=0)
-        self.theta = nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1, stride=1, padding=0)
-        self.phi = nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1, stride=1, padding=0)
-        self.out_conv = nn.Conv2d(in_channels=self.inter_channels, out_channels=self.in_channels, kernel_size=1, stride=1, padding=0)
-        self.softmax = nn.Softmax(dim=-1)
-
-    def forward(self, x):
-        g_x = self.g(x).view(x.size(0), self.inter_channels, -1)  
-        theta_x = self.theta(x).view(x.size(0), self.inter_channels, -1) 
-        phi_x = self.phi(x).view(x.size(0), self.inter_channels, -1) 
-        f = torch.matmul(theta_x.transpose(1, 2), phi_x)  
-        f = f / (self.inter_channels ** 0.5)
-        attention_weights = self.softmax(f) 
-        # compute the final feature map
-        out = torch.matmul(g_x, attention_weights.transpose(1, 2)) 
-        out = out.view(x.size(0), self.inter_channels, x.size(2), x.size(3)) 
-        out = self.out_conv(out)
-
-        return out + x
-
 class skip(nn.Module):
-    '''
-    skip connection
-    '''
     def __init__(self, kernel=1,stride=1, padding=0, in_channel=32, out_channel=64):
         super().__init__()
-        self.proj1 = nn.Conv2d(in_channel, out_channel, kernel_size=1, stride=stride, padding=0)
-        self.proj2 = nn.Conv2d(in_channel, out_channel, kernel_size=3, stride=stride, padding=1)
-        self.proj3 = nn.Conv2d(out_channel, out_channel, kernel_size=1, stride=1, padding=0)
+        self.proj1 = nn.Conv2d(in_channel, in_channel, kernel_size=3, stride=stride, padding=1)
+        self.proj2 = nn.Conv2d(in_channel, in_channel, kernel_size=1, stride=stride, padding=0)
+        self.proj3 = nn.Conv2d(in_channel, out_channel, kernel_size=1, stride=1, padding=0)        
         self.act = nn.GELU()
-                     
-        def _initialize_weights(m):
-            if type(m) == nn.Conv2d:
-                nn.init.kaiming_normal_(m.weight)
-        self.apply(_initialize_weights)
-                     
+
     def forward(self, x):
         x1 = self.act(self.proj1(x))
         x2 = self.act(self.proj2(x))
         x = self.proj3(x1 + x2)
         return x
 
-class DeformableICM(nn.Module):
-    '''
-    implementation of DILM module
-    '''
+class DeformableILM(nn.Module):
     def __init__(self, in_chans=3, height=256, width=256, batch=10):
-        super(DeformableICM, self).__init__()
+        super(DeformableILM, self).__init__()
         self.deform_conv3 = DeformConv2dPack(in_channels=in_chans, out_channels=in_chans, kernel_size=3, padding=1)
         self.deform_conv5 = DeformConv2dPack(in_channels=in_chans, out_channels=in_chans, kernel_size=5, padding=2)
         self.deform_conv7 = DeformConv2dPack(in_channels=in_chans, out_channels=in_chans, kernel_size=7, padding=3)
         self.act = nn.GELU()
-        
-        def _initialize_weights(m):
-            if type(m) == DeformConv2dPack:
-                nn.init.kaiming_normal_(m.weight)
-        self.apply(_initialize_weights)
-        
+
     def forward(self, x):
         x3 = self.act(self.deform_conv3(x))
         x5 = self.act(self.deform_conv5(x))
@@ -101,10 +55,7 @@ class DeformableICM(nn.Module):
         x = x3+x5+x7+x
         return x
 
-class ICM(nn.Module):
-    '''
-    implementation of ICM module
-    '''
+class ILM(nn.Module):
     def __init__(self, patch_size=16, stride=2, padding=0, 
                  in_chans=3, embed_dim=128, norm_layer=None):
         super().__init__()
@@ -112,7 +63,7 @@ class ICM(nn.Module):
         self.proj5 = nn.Conv2d(in_chans, embed_dim, kernel_size=5, stride=stride, padding=2)
         self.proj3 = nn.Conv2d(in_chans, embed_dim, kernel_size=3, stride=stride, padding=1)
         self.res = nn.Conv2d(in_chans, embed_dim, kernel_size=1, stride=stride, padding=0) #change input dimension to output dimension
-        self.act = nn.GELU()
+        self.act = nn.ReLU()
 
     def forward(self, x):
         x7 = self.act(self.proj7(x))
@@ -123,9 +74,6 @@ class ICM(nn.Module):
         return x
 
 class NLM(nn.Module):
-    '''
-    implementation of NLM module
-    '''
     def __init__(self, patch_size=16, stride=1, padding=0, 
                  in_chans=128, embed_dim=128, norm_layer=None):
         super().__init__()
@@ -133,7 +81,7 @@ class NLM(nn.Module):
         self.proj5 = nn.Conv2d(in_chans, in_chans, kernel_size=5, stride=stride, padding=2)
         self.proj3 = nn.Conv2d(in_chans, in_chans, kernel_size=3, stride=stride, padding=1)
         self.NL = NonLocal(in_chans)
-        self.act = nn.GELU()
+        self.act = nn.ReLU()
 
     def forward(self, x):
         x7 = self.act(self.proj7(x))
@@ -172,9 +120,6 @@ class Pooling(nn.Module):
 
 
 class Mlp(nn.Module):
-    '''
-    Implementation of Mlp module.
-    '''
     def __init__(self, in_features, hidden_features=None, 
                  out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -184,12 +129,7 @@ class Mlp(nn.Module):
         self.act = act_layer()
         self.fc2 = nn.Conv2d(hidden_features, out_features, 1)
         self.drop = nn.Dropout(drop)
-                     
-        def _initialize_weights(m):
-            if type(m) == nn.Conv2d:
-                nn.init.kaiming_normal_(m.weight)
-        self.apply(_initialize_weights)
-                     
+
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
@@ -281,13 +221,13 @@ class PCN(nn.Module):
         self.skip1 = skip(in_channel=embed_dims[0], out_channel=embed_dims[1])
         self.relu = nn.ReLU()
         #PatchEmbedding for encoder
-        self.patch_embed1 = ICM(stride=2, in_chans=3, embed_dim=embed_dims[0])
-        self.patch_embed2 = ICM(stride=2, in_chans=embed_dims[0], embed_dim=embed_dims[1])
-        self.patch_embed3 = ICM(stride=1, in_chans=embed_dims[1], embed_dim=embed_dims[2])
+        self.patch_embed1 = ILM(stride=2, in_chans=3, embed_dim=embed_dims[0])
+        self.patch_embed2 = ILM(stride=2, in_chans=embed_dims[0], embed_dim=embed_dims[1])
+        self.patch_embed3 = ILM(stride=1, in_chans=embed_dims[1], embed_dim=embed_dims[2])
         #PatchEmbedding fo decoder
         self.patch_embed4 = UpSample(patch_size=2, stride=2, padding=0, in_chans=embed_dims[2], embed_dim=embed_dims[3])
         self.patch_embed5 = UpSample(patch_size=2, stride=2, padding=0, in_chans=embed_dims[3], embed_dim=embed_dims[4])
-        self.patch_embed6 = ICM(stride=1, in_chans=embed_dims[4], embed_dim=3)
+        self.patch_embed6 = ILM(stride=1, in_chans=embed_dims[4], embed_dim=3)
         self.bottleneck = NLM(128)
         # set the main block in network
         self.stage1 = basic_blocks(embed_dims[0], 0, layers, 
@@ -325,17 +265,10 @@ class PCN(nn.Module):
                                  drop_path_rate=drop_path_rate,
                                  use_layer_scale=use_layer_scale, 
                                  layer_scale_init_value=layer_scale_init_value) 
-        # register buffer for simplified model
+                # stores biases of surface feature branch (net simplification)
         self.register_buffer('res1_s_pre', None)
         self.register_buffer('res2_s_pre', None)
         self.register_buffer('res3_s_pre', None)
-
-        # initialization function, first checks the module type,
-        def _initialize_weights(m):
-            if type(m) == nn.Conv2d:
-                nn.init.kaiming_normal_(m.weight)
-
-        self.apply(_initialize_weights)
 
     def simplify(self, s):
         res1_s = self.patch_embed1(s)
@@ -369,17 +302,17 @@ class PCN(nn.Module):
         
         x = self.patch_embed1(x) - res1_s 
         x0_res = self.skip1(x) 
-        x = self.stage1(x) 
-        x = self.patch_embed2(x) - res2_s 
+        x = self.stage1(x)
+        x = self.patch_embed2(x) - res2_s
         x = self.stage2(x)
         x = self.patch_embed3(x) - res3_s 
         x = self.stage3(x)
 
         x = self.bottleneck(x)
         
-        x = self.patch_embed4(x) + x0_res  
+        x = self.patch_embed4(x) + x0_res 
         x = self.stage4(x) 
-        x = self.patch_embed5(x) 
+        x = self.patch_embed5(x)  
         x = self.stage5(x) 
         x = self.relu(self.patch_embed6(x)) 
         return torch.clamp(x, max=1)
@@ -392,9 +325,8 @@ class GRN(nn.Module):
         super(GRN, self).__init__()
         self.grid_shape = grid_shape
         self.out_size = out_size
-        self.with_refine = with_refine  
+        self.with_refine = with_refine 
         self.name = 'GRN' if not with_refine else 'GRN_without_refine'
-        # relu
         self.relu = nn.ReLU()
         self.leakyRelu = nn.LeakyReLU(0.1)
 
@@ -402,7 +334,7 @@ class GRN(nn.Module):
         self.register_buffer('fine_grid', None)
 
         # affine params
-        self.affine_mat = nn.Parameter(torch.Tensor([1, 0, 0, 0, 1, 0]).view(-1, 2, 3)) 
+        self.affine_mat = nn.Parameter(torch.Tensor([1, 0, 0, 0, 1, 0]).view(-1, 2, 3)) # affine matrix
 
         # tps params
         self.nctrl = self.grid_shape[0] * self.grid_shape[1]
@@ -420,9 +352,11 @@ class GRN(nn.Module):
         if self.with_refine:
             self.grid_refine_net = nn.Sequential(
                 nn.Conv2d(2, 32, 3, 2, 1),
-                DeformableICM(in_chans=32, height=128, width=128),
+                self.relu,
+                DeformableILM(in_chans=32, height=128, width=128),
                 nn.Conv2d(32, 64, 3, 2, 1),
-                DeformableICM(in_chans=64, height=64, width=64),
+                self.relu,
+                DeformableILM(in_chans=64, height=64, width=64),
                 NonLocal(64),
                 nn.ConvTranspose2d(64, 32, 2, 2, 0),
                 self.relu,
@@ -433,16 +367,18 @@ class GRN(nn.Module):
         else:
             self.grid_refine_net = None  
 
+    # initialize GRN's affine matrix to the input affine_vec
     def set_affine(self, affine_vec):
         self.affine_mat.data = torch.Tensor(affine_vec).view(-1, 2, 3)
 
+    # simplify trained model to a single sampling grid for faster testing
     def simplify(self, x):
         # generate coarse affine and TPS grids
-        coarse_affine_grid = F.affine_grid(self.affine_mat, torch.Size([1, x.shape[1], x.shape[2], x.shape[3]])).permute((0, 3, 1, 2))
+        coarse_affine_grid = F.affine_grid(self.affine_mat, torch.Size([1, x.shape[1], x.shape[2], x.shape[3]])).permute((0, 3, 1, 2)) 
         coarse_tps_grid = pytorch_tps.tps_grid(self.theta, self.ctrl_pts, (1, x.size()[1]) + self.out_size)
 
         # use TPS grid to sample affine grid
-        tps_grid = F.grid_sample(coarse_affine_grid, coarse_tps_grid).to(device=device) 
+        tps_grid = F.grid_sample(coarse_affine_grid, coarse_tps_grid).to(device=device)
 
         # refine TPS grid using grid refinement net and save it to self.fine_grid
         if self.with_refine:
@@ -451,8 +387,8 @@ class GRN(nn.Module):
             self.fine_grid = torch.clamp(tps_grid, min=-1, max=1).permute((0, 2, 3, 1))
 
     def forward(self, x):
+        batch = x.shape[0]
         if self.fine_grid is None:
-            # not simplified (training/validation)
             # generate coarse affine and TPS grids
             coarse_affine_grid = F.affine_grid(self.affine_mat, torch.Size([1, x.shape[1], x.shape[2], x.shape[3]])).permute((0, 3, 1, 2))
             coarse_tps_grid = pytorch_tps.tps_grid(self.theta, self.ctrl_pts, (1, x.size()[1]) + self.out_size)
@@ -480,17 +416,21 @@ class IDNetFull(nn.Module):
         # initialize from existing models or create new models
         self.grn = copy.deepcopy(grn.module) if grn is not None else GRN()
         self.pcn = copy.deepcopy(pcn.module) if pcn is not None else PCN()
+
+    # simplify trained model to a single sampling grid for faster testing
     def simplify(self, s):
         self.grn.simplify(s)
         self.pcn.simplify(self.grn(s))
 
     # s is Bx3x256x256 surface image
     def forward(self, x, s):
+        # geometric correction using GRN (both x and s)
         x = self.grn(x)
         s = self.grn(s)
+        # photometric compensation using PCN
         x = self.pcn(x, s)
-        return x
 
+        return x
 
 if __name__=='__main__':
     input = torch.randn(10,3,256,256)
