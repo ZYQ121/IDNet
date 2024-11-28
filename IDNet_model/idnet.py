@@ -409,7 +409,7 @@ class GRN(nn.Module):
         x = F.grid_sample(x, fine_grid)
         return x
     
-class IDNetFull(nn.Module):
+class IDNet(nn.Module):
     def __init__(self, grn=None, pcn=None):
         super(IDNetFull, self).__init__()
         self.name = self.__class__.__name__
@@ -434,6 +434,6 @@ class IDNetFull(nn.Module):
 
 if __name__=='__main__':
     input = torch.randn(10,3,256,256)
-    model = IDNetFull()
+    model = IDNet()
     output = model(input, input)
     print(output.size())
